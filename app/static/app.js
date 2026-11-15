@@ -263,7 +263,8 @@
       var name = select.value.split('@')[0];
       var item = currentEntry();
       var dims = dimsInput.value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
-      saveHost.innerHTML = '<p class="small muted" style="margin:0">登记中…</p>';
+      var opId = 'op_' + Math.random().toString(16).slice(2, 10);
+      saveHost.innerHTML = '<p class="small muted" style="margin:0">登记中…（基于 r' + esc(item.head_revision) + '）</p>';
       try {
         var created = await postJSON('/api/registry', {
           name: name,
@@ -273,16 +274,54 @@
           unit: item.unit || '',
           owner: item.owner || '指标体系组',
           description: '工作台登记',
-          published: false
+          published: false,
+          expected_revision: item.head_revision,
+          op_id: opId
         });
-        saveHost.innerHTML = '<div class="alert alert-info">已登记 <strong>' + esc(created.key) + '</strong>：归一化 ' +
-          esc(created.normalized) + '；同名口径分组 ' + esc(created.caliber_group_count) + ' 组' +
+        saveHost.innerHTML = '<div class="alert alert-info">已登记 <strong>' + esc(created.key) + '</strong> 为 r' +
+          esc(created.revision) + '：归一化 ' + esc(created.normalized) + '；同名口径分组 ' +
+          esc(created.caliber_group_count) + ' 组' +
           (created.caliber_conflict ? '（仍存在同名异口径，发布会被拦截）' : '') + '</div>';
       } catch (err) {
+        var detail = err.data || {};
+        if (detail.status === 'revision_conflict') {
+          saveHost.innerHTML = '<div class="alert alert-error"><strong>修订冲突 · 已保留两份候选</strong>' +
+            '<p class="small" style="margin:4px 0">' + esc(detail.message) + '</p>' +
+            renderConflictDiff(detail.diff) +
+            '<p class="small" style="margin:4px 0 0"><a href="/conflicts">去冲突处理页选择采用并填写依据 →</a></p></div>';
+          return;
+        }
         saveHost.innerHTML = '';
         showError(saveHost, err);
       }
     });
+
+    function renderConflictDiff(diff) {
+      var rows = (diff || []).map(function (row) {
+        return '<tr><td class="small">' + esc(row.field) + '</td><td class="mono small">' +
+          esc(row.before === null ? '—' : row.before) + '</td><td class="mono small">' +
+          esc(row.after === null ? '—' : row.after) + '</td><td>' +
+          tag(row.changed ? '已变更' : '一致', row.changed ? 'err' : 'ok') + '</td></tr>';
+      }).join('');
+      return '<div class="table-wrap"><table class="dense"><thead><tr><th>字段</th><th>已确认</th><th>本次提交</th><th>差异</th></tr></thead><tbody>' +
+        rows + '</tbody></table></div>';
+    }
+
+    function renderPublishConflict(host, detail) {
+      var blockers = (detail.blockers || []).map(function (item) {
+        return '<li>' + tag(item.code, 'err') + ' ' + esc(item.detail) + '</li>';
+      }).join('');
+      var conflictBlock = detail.status === 'revision_conflict'
+        ? '<p class="small" style="margin:4px 0">' + esc(detail.message) + '</p>' +
+          renderConflictDiff(detail.diff) +
+          '<p class="small" style="margin:4px 0 0"><a href="/conflicts">去冲突处理页选择采用并填写依据 →</a></p>'
+        : '';
+      host.innerHTML = '<div class="alert alert-error"><strong>' + esc(detail.key || '发布被阻断') +
+        ' · ' + esc(detail.status === 'revision_conflict' ? '修订冲突' : '发布被阻断') +
+        '</strong>（HTTP ' + esc(detail.status === 'revision_conflict' ? 409 : 409) + '）' +
+        (blockers ? '<ul class="list small" style="margin:4px 0 0">' + blockers + '</ul>' : '') +
+        conflictBlock + '</div>';
+    }
 
     var publishButton = qs('#btn-publish');
     if (publishButton) {
@@ -290,20 +329,19 @@
         var parts = select.value.split('@');
         var name = parts[0];
         var version = parseInt(parts[1], 10);
-        saveHost.innerHTML = '<p class="small muted" style="margin:0">提交发布校验…</p>';
+        var item = currentEntry();
+        saveHost.innerHTML = '<p class="small muted" style="margin:0">提交发布校验（基于 r' + esc(item.head_revision) + '）…</p>';
         try {
-          var result = await postJSON('/api/publish', { name: name, version: version });
+          var result = await postJSON('/api/publish', {
+            name: name,
+            version: version,
+            expected_revision: item.head_revision,
+            op_id: 'pub_' + Math.random().toString(16).slice(2, 10)
+          });
           saveHost.innerHTML = '<div class="alert alert-info">发布通过：<strong>' + esc(result.key) +
-            '</strong>（口径 ' + esc(result.normalized) + '）</div>';
+            '</strong>（口径 ' + esc(result.normalized) + '，r' + esc(result.revision) + '）</div>';
         } catch (err) {
-          var detail = err.data || {};
-          var blockers = (detail.blockers || []).map(function (item) {
-            return '<li>' + tag(item.code, 'err') + ' ' + esc(item.detail) + '</li>';
-          }).join('');
-          saveHost.innerHTML = '<div class="alert alert-error"><strong>' + esc(detail.key || '发布被阻断') +
-            ' · 发布被阻断</strong>（HTTP ' + esc(err.status) + '）' +
-            (blockers ? '<ul class="list small" style="margin:4px 0 0">' + blockers + '</ul>' : '<div>' + esc(err.message || '') + '</div>') +
-            '</div>';
+          renderPublishConflict(saveHost, err.data || { key: name + '@' + version });
         }
       });
     }
@@ -365,10 +403,14 @@
       try {
         var result = await postJSON('/api/publish', {
           name: button.getAttribute('data-name'),
-          version: parseInt(button.getAttribute('data-version'), 10)
+          version: parseInt(button.getAttribute('data-version'), 10),
+          expected_revision: button.getAttribute('data-expected') === null
+            ? null
+            : parseInt(button.getAttribute('data-expected'), 10),
+          op_id: 'pub_' + Math.random().toString(16).slice(2, 10)
         });
         host.innerHTML = '<div class="alert alert-info">发布通过：<strong>' + esc(result.key) +
-          '</strong>（口径 ' + esc(result.normalized) + '）</div>';
+          '</strong>（口径 ' + esc(result.normalized) + '，r' + esc(result.revision) + '）</div>';
         button.disabled = true;
         button.textContent = '已发布';
       } catch (err) {
@@ -377,10 +419,73 @@
         var blockers = (detail.blockers || []).map(function (item) {
           return '<li>' + tag(item.code, 'err') + ' ' + esc(item.detail) + '</li>';
         }).join('');
+        var unresolved = (detail.unresolved || []).map(function (item) {
+          return '<li>' + tag(item.reason || 'unresolved', 'err') + ' ' + esc(item.target) + '</li>';
+        }).join('');
         host.innerHTML = '<div class="alert alert-error"><strong>' + esc(detail.key || '发布被阻断') +
-          ' · 发布被阻断</strong>（HTTP ' + esc(err.status) + '）' +
-          (blockers ? '<ul class="list small" style="margin:4px 0 0">' + blockers + '</ul>' : '<div>' + esc(err.message || '') + '</div>') +
+          ' · ' + esc(detail.status === 'revision_conflict' ? '修订冲突' : '发布被阻断') + '</strong>' +
+          (blockers ? '<ul class="list small" style="margin:4px 0 0">' + blockers + '</ul>' : '') +
+          (unresolved ? '<ul class="list small" style="margin:4px 0 0">' + unresolved + '</ul>' : '') +
+          (detail.status === 'revision_conflict'
+            ? '<p class="small" style="margin:4px 0 0"><a href="/conflicts">查看两份候选与逐项差异 →</a></p>'
+            : '<div>' + esc(err.message || '') + '</div>') +
           '</div>';
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------- 冲突页：恢复 / 解决
+  qsa('.btn-recover').forEach(function (button) {
+    button.addEventListener('click', async function () {
+      var host = qs('#recover-out');
+      host.innerHTML = '<p class="small muted" style="margin:0">恢复中…</p>';
+      try {
+        var result = await postJSON('/api/publish/' + encodeURIComponent(button.getAttribute('data-op')) + '/recover', {});
+        host.innerHTML = '<div class="alert alert-info">已恢复 <strong>' + esc(result.name) + '@' + esc(result.version) +
+          '</strong> 到 r' + esc(result.restored_revision) + '；用同一 op_id 重试会复用原目标修订，不会多出新修订。</div>';
+        button.disabled = true;
+        button.textContent = '已恢复';
+      } catch (err) {
+        host.innerHTML = '<div class="alert alert-error">' + esc(err.message) + '</div>';
+      }
+    });
+  });
+
+  qsa('.btn-resolve').forEach(function (button) {
+    button.addEventListener('click', async function () {
+      var card = button.closest('.panel-body');
+      var choice = qs('.resolve-choice', card).value;
+      var reason = qs('.resolve-reason', card).value.trim();
+      var errorHost = qs('.resolve-error', card);
+      var out = qs('.resolve-out', card);
+      clearError(errorHost);
+      out.innerHTML = '';
+      if (!reason) {
+        errorHost.hidden = false;
+        errorHost.textContent = '请填写最终采用依据。';
+        return;
+      }
+      out.innerHTML = '<p class="small muted" style="margin:0">提交中…</p>';
+      try {
+        var result = await postJSON('/api/conflicts/' + encodeURIComponent(button.getAttribute('data-conflict')) + '/resolve', {
+          choice: choice,
+          reason: reason,
+          expected_revision: parseInt(button.getAttribute('data-expected'), 10)
+        });
+        out.innerHTML = '<div class="alert alert-info">已处理：采用 <strong>' +
+          esc(result.resolution.adopted === 'submitted' ? '本次提交' : '已确认候选') + '</strong>' +
+          (result.assigned_version ? '（版本 v' + esc(result.assigned_version) + '）' : '') +
+          '，当前 r' + esc(result.revision) + '。</div>';
+        button.disabled = true;
+      } catch (err) {
+        var detail = err.data || {};
+        if (detail.status === 'revision_conflict') {
+          out.innerHTML = '<div class="alert alert-error">处理期间修订又变化了：' + esc(detail.message) +
+            ' <a href="/conflicts">刷新后重新查看差异 →</a></div>';
+        } else {
+          errorHost.hidden = false;
+          errorHost.textContent = '处理失败：' + (err.message || '');
+        }
       }
     });
   });

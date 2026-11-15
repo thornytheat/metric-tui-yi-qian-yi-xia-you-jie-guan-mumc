@@ -12,19 +12,56 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from . import conflict, expr, gate, graph as graph_mod, registry, report, seed, settings, store
+from . import (
+    conflict,
+    expr,
+    gate,
+    graph as graph_mod,
+    registry,
+    report,
+    revisions,
+    seed,
+    settings,
+    store,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
+
+
+def _fmt_value(value: Any) -> str:
+    """模板展示：列表按逗号连接，空值显示破折号，布尔转中文。"""
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, (list, tuple)):
+        return "、".join(str(item) for item in value) if value else "（空）"
+    return str(value)
+
+
+templates.env.filters["fmtval"] = _fmt_value
+
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     with store.session() as conn:
         application.state.seed_result = seed.seed(conn)
+    with store.write_session() as conn:
+        recovered = revisions.recover_pending(conn, report.now_iso())
+        for item in recovered:
+            store.add_event(
+                conn,
+                "recover",
+                f"发布中断恢复：{item['name']}@{item['version']} 回到 r{item['restored_revision']}",
+                item,
+                report.now_iso(),
+            )
+        application.state.recovered = recovered
     yield
 
 
-app = FastAPI(title=settings.APP_NAME, version="1.0.0", lifespan=lifespan)
+app = FastAPI(title=settings.APP_NAME, version="1.1.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 
 
@@ -32,7 +69,13 @@ def load_metrics() -> list[dict]:
     with store.session() as conn:
         store.init_schema(conn)
         metrics = store.all_metrics(conn)
-    return [registry.with_normalized(metric) for metric in metrics]
+        heads = store.revision_map(conn)
+    enriched = []
+    for metric in metrics:
+        item = registry.with_normalized(metric)
+        item["head_revision"] = heads.get(item["name"], 0)
+        enriched.append(item)
+    return enriched
 
 
 def base_context(request: Request, **extra: Any) -> dict:
@@ -69,6 +112,17 @@ class ImpactRequest(BaseModel):
 class PublishRequest(BaseModel):
     name: str
     version: int
+    expected_revision: int | None = None
+    op_id: str | None = None
+    impact_id: str | None = None
+    simulate_interrupt: bool = False
+
+
+class ResolveConflictRequest(BaseModel):
+    choice: str
+    reason: str = ""
+    expected_revision: int | None = None
+    decided_by: str = "复核人"
 
 
 class RegistryRequest(BaseModel):
@@ -82,6 +136,8 @@ class RegistryRequest(BaseModel):
     description: str = ""
     published: bool = False
     allow_missing_reference: bool = False
+    expected_revision: int | None = None
+    op_id: str | None = None
 
 
 # --------------------------------------------------------------------------- 页面
@@ -139,6 +195,8 @@ def workbench(request: Request) -> HTMLResponse:
                 "unit": metric["unit"],
                 "published": metric["published"],
                 "owner": metric["owner"],
+                "head_revision": metric.get("head_revision", 0),
+                "revision": metric.get("revision", 0),
             }
             for metric in registry.versions_of(metrics, name)
         ]
@@ -204,15 +262,23 @@ def review(request: Request) -> HTMLResponse:
         impact = store.latest_impact(conn)
         events = store.list_events(conn, limit=25)
         checks = store.list_checks(conn, limit=8)
+        heads = store.revision_map(conn)
+        open_conflicts = store.list_conflicts(conn, status="open", limit=10)
+        pending_ops = store.list_publish_ops(conn, status="pending")
+        recovered_ops = store.list_publish_ops(conn, status="recovered", limit=5)
     context = {
         "app_name": settings.APP_NAME,
         "app_short": settings.APP_SHORT,
         "overview": report.overview(metrics),
         "metrics": metrics,
+        "heads": heads,
         "latest": latest,
         "impact": impact,
         "events": events,
         "checks": checks,
+        "open_conflicts": open_conflicts,
+        "pending_ops": pending_ops,
+        "recovered_ops": recovered_ops,
         "error": None,
         "notice": None,
         "page": "review",
@@ -262,12 +328,20 @@ def api_registry() -> dict:
 @app.post("/api/registry", status_code=201)
 def api_register(payload: RegistryRequest) -> JSONResponse:
     metrics = load_metrics()
-    version = payload.version if payload.version else registry.next_version(metrics, payload.name)
-    if store_metric_exists(metrics, payload.name, version):
-        raise HTTPException(
-            status_code=409,
-            detail=f"{payload.name}@{version} 已存在，请递增 version 后再登记",
-        )
+    with store.session() as read_conn:
+        head = store.get_head(read_conn, payload.name)
+        current_revision = int(head["revision"]) if head else 0
+    op_id = (payload.op_id or "").strip() or report.new_id("op")
+    version = (
+        payload.version
+        if payload.version
+        else registry.next_version(metrics, payload.name)
+    )
+    expected_revision = (
+        payload.expected_revision
+        if payload.expected_revision is not None
+        else current_revision
+    )
     try:
         metric = registry.validate_metric(
             {
@@ -317,46 +391,65 @@ def api_register(payload: RegistryRequest) -> JSONResponse:
         )
 
     now = report.now_iso()
-    with store.session() as conn:
-        store.init_schema(conn)
-        store.insert_metric(conn, metric, now)
+    with store.write_session() as conn:
+        result = revisions.register_metric(
+            conn,
+            metric,
+            expected_revision=expected_revision,
+            op_id=op_id,
+            now=now,
+        )
+        if result["status"] == "revision_conflict":
+            conflicts = conflict.caliber_groups(metrics, metric["name"])
+            result["caliber_group_count"] = len(conflicts)
+            result["caliber_conflict"] = len(conflicts) > 1
+            return JSONResponse(status_code=409, content=result)
+        if result["status"] == "duplicate":
+            raise HTTPException(
+                status_code=409,
+                detail=f"{payload.name}@{result['version']} 已存在，请递增 version 后再登记",
+            )
         store.add_event(
             conn,
             "register",
-            f"登记指标 {metric['name']}@{metric['version']}（{metric['normalized']}）",
+            (
+                f"登记指标 {result['name']}@{result['version']} 为 r{result['revision']}"
+                f"（{result['normalized']}）"
+            ),
             {
-                "key": f"{metric['name']}@{metric['version']}",
-                "normalized": metric["normalized"],
-                "published": metric["published"],
+                "key": f"{result['name']}@{result['version']}",
+                "revision": result["revision"],
+                "revision_id": result.get("revision_id", ""),
+                "op_id": op_id,
+                "normalized": result["normalized"],
+                "published": result["published"],
             },
             now,
         )
     conflicts = conflict.caliber_groups(metrics + [metric], metric["name"])
-    return JSONResponse(
-        status_code=201,
-        content={
-            "ok": True,
-            "key": f"{metric['name']}@{metric['version']}",
-            "name": metric["name"],
-            "version": metric["version"],
-            "expression": metric["expression"],
-            "normalized": metric["normalized"],
-            "aggregation": metric["aggregation"],
-            "dimensions": metric["dimensions"],
-            "published": metric["published"],
-            "unknown_dims": unknown_dims,
-            "missing_references": missing_refs,
-            "unpublished_references": unpublished_refs,
-            "caliber_group_count": len(conflicts),
-            "caliber_conflict": len(conflicts) > 1,
-        },
-    )
-
-
-def store_metric_exists(metrics: list[dict], name: str, version: int) -> bool:
-    return any(
-        metric["name"] == name and int(metric["version"]) == int(version) for metric in metrics
-    )
+    body = {
+        "ok": True,
+        "status": result["status"],
+        "key": f"{result['name']}@{result['version']}",
+        "name": result["name"],
+        "version": result["version"],
+        "revision": result["revision"],
+        "revision_id": result.get("revision_id", ""),
+        "previous_revision": result.get("previous_revision"),
+        "op_id": op_id,
+        "deduplicated": result.get("deduplicated", False),
+        "expression": result["expression"],
+        "normalized": result["normalized"],
+        "aggregation": result["aggregation"],
+        "dimensions": result["dimensions"],
+        "published": result["published"],
+        "unknown_dims": unknown_dims,
+        "missing_references": missing_refs,
+        "unpublished_references": unpublished_refs,
+        "caliber_group_count": len(conflicts),
+        "caliber_conflict": len(conflicts) > 1,
+    }
+    return JSONResponse(status_code=201, content=body)
 
 
 def _unknown_dimensions(analysis: dict, metrics: list[dict]) -> list[str]:
@@ -478,14 +571,21 @@ def api_impact(payload: ImpactRequest) -> dict:
     except gate.TargetNotFound as exc:
         raise HTTPException(status_code=404, detail={"error": exc.message})
     now = report.now_iso()
-    with store.session() as conn:
-        store.init_schema(conn)
+    with store.write_session() as conn:
+        head = store.get_head(conn, payload.name)
+        impact["base_revision"] = int(head["revision"]) if head else 0
+        impact["registry_digest"] = revisions.registry_digest(metrics)
         store.save_impact(conn, impact)
         store.add_event(
             conn,
             "impact",
-            f"评估 {impact['target']['key']} 变更：下游 {impact['downstream_count']} 个，breaking {impact['breaking_count']} 个",
-            {"impact_id": impact["impact_id"], "key": impact["target"]["key"]},
+            f"评估 {impact['target']['key']} 变更：下游 {impact['downstream_count']} 个，"
+            f"breaking {impact['breaking_count']} 个（基于 r{impact['base_revision']}）",
+            {
+                "impact_id": impact["impact_id"],
+                "key": impact["target"]["key"],
+                "base_revision": impact["base_revision"],
+            },
             now,
         )
     return impact
@@ -493,26 +593,228 @@ def api_impact(payload: ImpactRequest) -> dict:
 
 @app.post("/api/publish")
 def api_publish(payload: PublishRequest) -> JSONResponse:
-    metrics = load_metrics()
-    try:
-        result = gate.publish_check(metrics, payload.name, int(payload.version))
-    except gate.GateError as exc:
-        raise HTTPException(status_code=404, detail={"error": exc.message})
-    if not result["ok"]:
-        return JSONResponse(status_code=409, content=result)
+    op_id = (payload.op_id or "").strip() or report.new_id("pub")
+    impact_id = (payload.impact_id or "").strip()
     now = report.now_iso()
-    with store.session() as conn:
-        store.init_schema(conn)
-        store.set_published(conn, payload.name, int(payload.version), True, now)
+
+    with store.write_session() as conn:
+        expected_revision = payload.expected_revision
+        if expected_revision is None:
+            head = store.get_head(conn, payload.name)
+            expected_revision = int(head["revision"]) if head else 0
+        prepared = revisions.prepare_publish(
+            conn,
+            name=payload.name,
+            version=int(payload.version),
+            expected_revision=int(expected_revision),
+            op_id=op_id,
+            impact_id=impact_id,
+            now=now,
+        )
+        if prepared["stage"] == "done":
+            result = prepared["result"]
+            store.add_event(
+                conn,
+                "publish",
+                f"发布重试幂等命中：{result.get('key', payload.name)} 已是 r{result.get('revision')}",
+                {"op_id": op_id, "deduplicated": True},
+                now,
+            )
+            return JSONResponse(status_code=200, content=result)
+        if prepared["stage"] == "not_found":
+            raise HTTPException(status_code=404, detail={"error": prepared["message"]})
+        if prepared["stage"] == "blocked":
+            return JSONResponse(status_code=409, content=prepared["result"])
+        if prepared["stage"] == "conflict":
+            result = prepared["result"]
+            store.add_event(
+                conn,
+                "conflict",
+                f"发布 {payload.name}@{payload.version} 修订冲突：已保留两份候选 {result['conflict_id']}",
+                {"conflict_id": result["conflict_id"], "op_id": op_id},
+                now,
+            )
+            return JSONResponse(status_code=409, content=result)
+
+        op = prepared["op"]
+        if payload.simulate_interrupt:
+            result = revisions.interrupt_publish(conn, op, now)
+            store.add_event(
+                conn,
+                "publish_interrupted",
+                f"发布 {op['name']}@{op['version']} 中断，op {op_id} 保持 pending",
+                result,
+                now,
+            )
+            return JSONResponse(status_code=503, content=result)
+
+        applied = revisions.apply_publish(conn, op, now)
         store.add_event(
             conn,
             "publish",
-            f"发布指标 {result['key']}（{result['normalized']}）",
-            {"key": result["key"], "normalized": result["normalized"]},
+            f"发布指标 {applied.get('key', payload.name)} 为 r{applied.get('revision')}"
+            f"（{applied.get('normalized', '')}）",
+            {
+                "key": applied.get("key"),
+                "revision": applied.get("revision"),
+                "revision_id": applied.get("revision_id"),
+                "op_id": op_id,
+                "impact_id": impact_id,
+            },
             now,
         )
-    result["published"] = True
-    return JSONResponse(status_code=200, content=result)
+    if not applied.get("ok"):
+        status = 409 if applied.get("status") == "revision_conflict" else 200
+        return JSONResponse(status_code=status, content=applied)
+    return JSONResponse(status_code=200, content=applied)
+
+
+@app.post("/api/publish/{op_id}/recover")
+def api_publish_recover(op_id: str) -> JSONResponse:
+    now = report.now_iso()
+    with store.write_session() as conn:
+        op = store.get_publish_op(conn, op_id)
+        if op is None:
+            raise HTTPException(status_code=404, detail={"error": f"发布操作 {op_id} 不存在"})
+        recovered_all = revisions.recover_pending(conn, now)
+        recovered = next((item for item in recovered_all if item["op_id"] == op_id), None)
+        if recovered is None:
+            result = {
+                "ok": True,
+                "status": "noop",
+                "op_id": op_id,
+                "op_status": store.get_publish_op(conn, op_id)["status"],
+                "message": "该发布操作没有待恢复的中断状态",
+            }
+            return JSONResponse(content=result)
+        store.add_event(
+            conn,
+            "recover",
+            f"发布中断恢复：{recovered['name']}@{recovered['version']} 回到 r{recovered['restored_revision']}",
+            recovered,
+            now,
+        )
+    return JSONResponse(content=recovered)
+
+
+@app.get("/api/publish/{op_id}")
+def api_publish_op(op_id: str) -> dict:
+    with store.session() as conn:
+        op = store.get_publish_op(conn, op_id)
+        if op is None:
+            raise HTTPException(status_code=404, detail={"error": f"发布操作 {op_id} 不存在"})
+        revision = store.revision_by_op(conn, op_id)
+    result = dict(op)
+    result["revision"] = (
+        {"seq": revision["seq"], "status": revision["status"], "version": revision["version"]}
+        if revision
+        else None
+    )
+    return result
+
+
+# --------------------------------------------------------------------------- 修订与冲突
+
+
+@app.get("/api/revisions")
+def api_revisions(name: str | None = None, limit: int = 50) -> dict:
+    with store.session() as conn:
+        revisions_list = store.list_revisions(conn, name=name, limit=limit)
+        if name:
+            heads = [head for head in [store.get_head(conn, name)] if head]
+        else:
+            rows = conn.execute("SELECT name FROM metric_heads ORDER BY name").fetchall()
+            heads = [store.get_head(conn, row["name"]) for row in rows]
+    return {
+        "name": name,
+        "heads": heads,
+        "count": len(revisions_list),
+        "revisions": revisions_list,
+    }
+
+
+@app.get("/api/revision/{name}")
+def api_metric_revisions(name: str) -> dict:
+    with store.session() as conn:
+        head = store.get_head(conn, name)
+        items = store.list_revisions(conn, name=name, limit=200)
+    if head is None and not items:
+        raise HTTPException(status_code=404, detail={"error": f"指标 {name} 没有任何修订记录"})
+    return {"name": name, "head": head, "revisions": items}
+
+
+@app.get("/api/conflicts")
+def api_conflicts(status: str | None = "open") -> dict:
+    with store.session() as conn:
+        items = store.list_conflicts(conn, status=status)
+    return {"status": status, "count": len(items), "conflicts": items}
+
+
+@app.get("/api/conflicts/{conflict_id}")
+def api_conflict_detail(conflict_id: str) -> dict:
+    with store.session() as conn:
+        item = store.get_conflict(conn, conflict_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail={"error": f"冲突 {conflict_id} 不存在"})
+    return item
+
+
+@app.post("/api/conflicts/{conflict_id}/resolve")
+def api_resolve_conflict(conflict_id: str, payload: ResolveConflictRequest) -> JSONResponse:
+    now = report.now_iso()
+    with store.write_session() as conn:
+        result = revisions.resolve_conflict(
+            conn,
+            conflict_id,
+            choice=payload.choice,
+            reason=payload.reason,
+            expected_revision=payload.expected_revision,
+            decided_by=payload.decided_by or "复核人",
+            now=now,
+        )
+        if result.get("status") == "not_found":
+            raise HTTPException(status_code=404, detail={"error": result["message"]})
+        if not result.get("ok"):
+            return JSONResponse(status_code=409, content=result)
+        store.add_event(
+            conn,
+            "resolve",
+            f"冲突 {conflict_id} 采用 {result['resolution']['adopted']} 候选"
+            f"（{result['resolution']['reason']}）",
+            {
+                "conflict_id": conflict_id,
+                "resolution": result["resolution"],
+                "revision": result.get("revision"),
+            },
+            now,
+        )
+    return JSONResponse(content=result)
+
+
+@app.get("/conflicts", response_class=HTMLResponse)
+def conflicts_page(request: Request) -> HTMLResponse:
+    metrics = load_metrics()
+    with store.session() as conn:
+        store.init_schema(conn)
+        open_items = store.list_conflicts(conn, status="open")
+        resolved_items = store.list_conflicts(conn, status="resolved", limit=10)
+        ops = store.list_publish_ops(conn, status="recovered")
+        pending_ops = store.list_publish_ops(conn, status="pending")
+    context = {
+        "app_name": settings.APP_NAME,
+        "app_short": settings.APP_SHORT,
+        "overview": report.overview(metrics),
+        "metrics": metrics,
+        "open_conflicts": open_items,
+        "resolved_conflicts": resolved_items,
+        "recovered_ops": ops,
+        "pending_ops": pending_ops,
+        "error": None,
+        "notice": None,
+        "page": "conflicts",
+        "active": "conflicts",
+    }
+    return templates.TemplateResponse(request, "conflicts.html", context)
 
 
 @app.get("/api/metrics")

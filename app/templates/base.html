@@ -22,6 +22,7 @@
       <a href="/" class="{% if page == 'index' %}active{% endif %}"><span class="ico">总</span><span>总览</span></a>
       <a href="/workbench" class="{% if page == 'workbench' %}active{% endif %}"><span class="ico">台</span><span>口径工作台</span>{% if overview.conflict_count %}<span class="badge">{{ overview.conflict_count }}</span>{% endif %}</a>
       <a href="/review" class="{% if page == 'review' %}active{% endif %}"><span class="ico">核</span><span>复核与发布</span>{% if overview.publish_blocked_count %}<span class="badge">{{ overview.publish_blocked_count }}</span>{% endif %}</a>
+      <a href="/conflicts" class="{% if page == 'conflicts' %}active{% endif %}"><span class="ico">冲</span><span>并发冲突与恢复</span>{% if open_conflicts %}<span class="badge">{{ open_conflicts | length }}</span>{% endif %}</a>
       {% if check %}<a href="/result/{{ check.check_id }}" class="{% if page == 'result' %}active{% endif %}"><span class="ico">果</span><span>本次体检结果</span></a>{% endif %}
       <div class="side-group">业务模块</div>
       <a href="/workbench#m1"><span class="ico">1</span><span>指标注册</span></a>

@@ -12,6 +12,12 @@
 {% block status_right %}{% if impact %}影响面 <code>{{ impact.impact_id }}</code>{% else %}{{ app_name }}{% endif %}{% endblock %}
 
 {% block content %}
+{% if open_conflicts or pending_ops %}
+<div class="alert alert-error" role="alert">
+  有 {{ open_conflicts | length }} 个并发冲突待处理、{{ pending_ops | length }} 个发布中断待恢复。
+  <a href="/conflicts">去冲突处理页查看两份候选与逐项差异 →</a>
+</div>
+{% endif %}
 <div class="page-head">
   <div>
     <h1 class="page-title">变更影响面与发布门禁</h1>
@@ -20,6 +26,7 @@
   </div>
   <div class="page-head-actions">
     {% if latest %}<a class="btn secondary small" href="/result/{{ latest.check_id }}">查看最近体检依据</a>{% endif %}
+    <a class="btn secondary small" href="/conflicts">并发冲突与恢复{% if open_conflicts %}（{{ open_conflicts | length }}）{% endif %}</a>
     <a class="btn small" href="/workbench">去工作台改口径</a>
   </div>
 </div>
@@ -46,7 +53,7 @@
       <div class="table-wrap roomy">
         <table class="dense" id="review-table">
       <thead>
-        <tr><th>指标</th><th>归一化表达式</th><th class="nowrap">聚合 · 维度</th><th>状态</th><th>操作</th></tr>
+        <tr><th>指标</th><th>归一化表达式</th><th class="nowrap">聚合 · 维度</th><th class="nowrap">修订</th><th>状态</th><th>操作</th></tr>
       </thead>
       <tbody>
       {% for metric in metrics %}
@@ -56,12 +63,13 @@
           <td class="nowrap"><strong>{{ metric.name }}</strong>@{{ metric.version }}<span class="sub">{{ metric.owner }} · {{ metric.unit or '—' }}</span></td>
           <td class="mono small cell-ellipsis">{{ metric.normalized }}</td>
           <td class="small nowrap">{{ metric.aggregation }} · {{ metric.dimensions | join(', ') }}</td>
+          <td class="small nowrap">r{{ metric.revision }}{% if metric.head_revision %}<span class="sub">当前 r{{ metric.head_revision }}</span>{% endif %}</td>
           <td class="nowrap">{% if metric.published %}<span class="tag ok">已发布</span>{% else %}<span class="tag warn">未发布</span>{% endif %}</td>
           <td class="nowrap">
             {% if metric.published %}
             <span class="muted small">—</span>
             {% else %}
-            <button type="button" class="secondary small btn-publish" data-name="{{ metric.name }}" data-version="{{ metric.version }}">发布</button>
+            <button type="button" class="secondary small btn-publish" data-name="{{ metric.name }}" data-version="{{ metric.version }}" data-expected="{{ metric.head_revision }}">发布</button>
             {% endif %}
           </td>
         </tr>
@@ -77,6 +85,7 @@
         <h2>变更影响面 · {{ impact.target.key }}</h2>
         <div class="panel-actions">
           <span class="tag">生成于 {{ impact.created_at }}</span>
+          <span class="tag">基于 r{{ impact.base_revision }}{% if impact.registry_digest %} · 快照 {{ impact.registry_digest }}{% endif %}</span>
           <span class="tag err">{{ impact.breaking_count }} breaking</span>
           <span class="tag warn">{{ impact.requires_sync_count }} requires_sync</span>
         </div>
