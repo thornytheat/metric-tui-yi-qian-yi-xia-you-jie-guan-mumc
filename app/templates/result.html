@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% block title %}体检结果 · {% if check %}{{ check.check_id }}{% else %}{{ check_id }}{% endif %}{% endblock %}
+{% block crumb %}体检结果{% endblock %}
+{% block meta %}{% if check %}<span class="dot {% if check.verdict == 'blocked' %}err{% else %}ok{% endif %}"></span>{% if check.verdict == 'blocked' %}不可发布{% else %}通过{% endif %} · {{ check.created_at }}{% else %}<span class="dot err"></span>记录不存在{% endif %}{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/workbench">回工作台</a>
+{% if check %}<a class="btn secondary small" href="/api/check/{{ check.check_id }}">查看 JSON</a>{% endif %}
+<form method="post" action="/check" style="display:inline-flex;margin:0">
+  <button type="submit" class="btn small">重新体检</button>
+</form>
+{% endblock %}
+{% block status_left %}{% if check %}体检指纹 <code>{{ check.fingerprint }}</code> · 注册表快照 {{ check.metrics | length }} 条 · 生成于 {{ check.created_at }}{% else %}未找到该体检记录{% endif %}{% endblock %}
+{% block status_right %}{% if check %}check_id <code>{{ check.check_id }}</code>{% else %}{{ app_name }}{% endif %}{% endblock %}
+
+{% block content %}
+{% if missing %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">体检记录不存在</h1>
+    <p class="page-sub">找不到 <code>{{ check_id }}</code>。可能已重建数据库卷，请重新执行一次体检。</p>
+  </div>
+</div>
+<div class="split wide-left">
+  <section class="panel">
+    <div class="panel-head"><h2>重新生成体检快照</h2></div>
+    <div class="panel-body">
+      <p class="small muted">体检结果按 check_id 落在 SQLite 的 checks 表里；清卷或换库后旧编号不可查。
+        重新体检会写入一份新快照并跳转到新的结果页。</p>
+    </div>
+    <div class="panel-actions">
+      <form method="post" action="/check" style="margin:0"><button type="submit" class="small">重新体检</button></form>
+      <a class="btn secondary small" href="/">回总览</a>
+    </div>
+  </section>
+</div>
+{% else %}
+
+<div class="page-head">
+  <div>
+    <h1 class="page-title">注册表体检结果 · {{ check.check_id }}</h1>
+    <p class="page-sub">
+      {{ check.created_at }} · 体检指纹 <code>{{ check.fingerprint }}</code> · 注册表快照 {{ check.metrics | length }} 个指标版本 ·
+      结论 <strong>{% if check.verdict == 'blocked' %}不可发布{% else %}通过{% endif %}</strong>
+    </p>
+  </div>
+  <div class="page-head-actions">
+    <a class="btn secondary small" href="/review">复核与发布</a>
+    <a class="btn small" href="/workbench">去工作台改口径</a>
+  </div>
+</div>
+
+<div class="alert {% if check.verdict == 'blocked' %}alert-error{% else %}alert-info{% endif %}" role="status">
+  <strong>结论：{% if check.verdict == 'blocked' %}不可发布。{% else %}通过。{% endif %}</strong>{{ check.verdict_detail }}
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi {% if check.stats.conflict_count %}err{% else %}ok{% endif %}">
+    <div class="k-label">同名异口径</div>
+    <div class="k-value">{{ check.stats.conflict_count }} 组</div>
+    <div class="k-note">共 {{ check.stats.conflict_variant_count }} 个口径分组</div>
+  </div>
+  <div class="kpi {% if check.stats.cycle_count %}err{% else %}ok{% endif %}">
+    <div class="k-label">依赖环</div>
+    <div class="k-value">{{ check.stats.cycle_count }} 条</div>
+    <div class="k-note">DFS 三色检出</div>
+  </div>
+  <div class="kpi {% if check.stats.publish_blocked_count %}warn{% else %}ok{% endif %}">
+    <div class="k-label">发布阻断</div>
+    <div class="k-value">{{ check.stats.publish_blocked_count }} 个</div>
+    <div class="k-note">引用未发布版本</div>
+  </div>
+  <div class="kpi {% if check.stats.cross_version_count %}warn{% else %}ok{% endif %}">
+    <div class="k-label">待同步跨版本</div>
+    <div class="k-value">{{ check.stats.cross_version_count }} 处</div>
+    <div class="k-note">显式 @版本 引用</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">无法解析引用</div>
+    <div class="k-value">{{ check.stats.unresolved_count }}</div>
+    <div class="k-note">最长下游深度 {{ check.stats.max_depth }}（{{ check.stats.max_depth_node }}）</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-head">
+    <div class="segmented" id="result-tabs">
+      <button type="button" data-tab-target="tab-conflict" class="active">冲突 {{ check.stats.conflict_count }}</button>
+      <button type="button" data-tab-target="tab-cycle">环 {{ check.stats.cycle_count }}</button>
+      <button type="button" data-tab-target="tab-gate">发布门禁 {{ check.stats.publish_blocked_count }}</button>
+      <button type="button" data-tab-target="tab-normal">归一化对照 {{ check.metrics | length }}</button>
+    </div>
+    <div class="panel-actions"><span class="tag">逐条依据 · 可滚动</span></div>
+  </div>
+  <div class="panel-body flush">
+    <div id="tab-conflict" class="tab-panel">
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0 0 8px">判定规则：同名指标的全部版本先归一化（去空白、去冗余括号、去 *1、统一前缀），再按归一化表达式分组；分组数 &gt; 1 即冲突。</p>
+      </div>
+      {% for item in check.conflicts %}
+      <div class="toolbar">
+        <strong>{{ item.name }} · {{ item.summary }}</strong>
+        <span class="spacer"></span>
+        <span class="tag err">{{ item.variant_count }} 组口径</span>
+      </div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>口径分组</th><th>归一化表达式</th><th>版本</th><th>原始表达式</th><th>负责人</th><th>发布</th></tr></thead>
+          <tbody>
+          {% for group in item.groups %}
+            {% set gidx = loop.index %}
+            {% for version in group.versions %}
+            <tr>
+              {% if loop.first %}<td rowspan="{{ group.versions | length }}"><strong>口径{{ gidx }}</strong><div class="small muted">{{ group.version_keys | length }} 个版本</div></td>{% endif %}
+              <td class="mono small">{{ group.normalized }}</td>
+              <td><strong>{{ version.name }}</strong>@{{ version.version }}</td>
+              <td class="mono small">{{ version.expression }}</td>
+              <td class="small">{{ version.owner }}</td>
+              <td>{% if version.published %}<span class="tag ok">已发布</span>{% else %}<span class="tag warn">未发布</span>{% endif %}</td>
+            </tr>
+            {% endfor %}
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">
+          差异摘要：
+          {% for diff in item.differences %}
+            <span class="tag">口径{{ loop.index }}：{{ diff.normalized }}（{{ diff.version_keys | join(' / ') }}）</span>
+          {% endfor %}
+        </p>
+      </div>
+      {% endfor %}
+      {% if not check.conflicts %}
+      <div class="empty">本次体检没有同名异口径。</div>
+      {% endif %}
+    </div>
+
+    <div id="tab-cycle" class="tab-panel" hidden>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0 0 8px">判定规则：节点 = 指标@版本，边 = 表达式里的 <code>metric:</code> 引用；DFS 三色（白/灰/黑）遇到灰色邻居即记录环路径。</p>
+      </div>
+      {% for cycle in check.cycles %}
+      <div class="toolbar">
+        <strong>环 {{ loop.index }} · {{ cycle.path | join(' → ') }}</strong>
+        <span class="spacer"></span>
+        <span class="tag err">{{ cycle.length }} 节点</span>
+      </div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>顺序</th><th>指标</th><th>归一化表达式</th><th>维度</th><th>负责人</th><th>发布</th></tr></thead>
+          <tbody>
+          {% for node in cycle.nodes %}
+            <tr>
+              <td class="small muted">{{ loop.index }}</td>
+              <td><strong>{{ node.name }}</strong>@{{ node.version }}</td>
+              <td class="mono small">{{ node.normalized }}</td>
+              <td class="small">{{ node.dimensions | join(', ') }}</td>
+              <td class="small">{{ node.owner }}</td>
+              <td>{% if node.published %}<span class="tag ok">已发布</span>{% else %}<span class="tag warn">未发布</span>{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">处理建议：环内指标互相定义，谁也无法先算出来；至少要有一端改成引用原子指标（<code>dim:</code>）。</p>
+      </div>
+      {% endfor %}
+      {% if not check.cycles %}
+      <div class="empty">本次体检没有依赖环。</div>
+      {% endif %}
+    </div>
+
+    <div id="tab-gate" class="tab-panel" hidden>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0 0 8px">判定规则：表达式里引用的每个指标版本都必须 published=true；否则该指标不能发布，并列出缺失版本。</p>
+      </div>
+      {% if check.publish_blocked %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>指标</th><th>原始表达式</th><th>归一化</th><th>未发布引用</th><th>缺失引用</th><th>依据</th></tr></thead>
+          <tbody>
+          {% for item in check.publish_blocked %}
+            <tr>
+              <td><strong>{{ item.name }}</strong>@{{ item.version }}<div class="small muted">{{ item.owner }}</div></td>
+              <td class="mono small">{{ item.expression }}</td>
+              <td class="mono small">{{ item.normalized }}</td>
+              <td>{% for ref in item.unpublished_refs %}<span class="tag err">{{ ref }}</span> {% endfor %}</td>
+              <td>{% for ref in item.missing_refs %}<span class="tag err">{{ ref }}</span> {% endfor %}</td>
+              <td class="small">{{ item.detail }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">没有发布阻断。</div>
+      {% endif %}
+
+      {% if check.cross_version %}
+      <div class="toolbar">
+        <strong>待同步的跨版本依赖（{{ check.stats.cross_version_count }} 处）</strong>
+        <span class="spacer"></span>
+        <span class="small muted">显式写了 @版本 的引用：改上游版本不会自动传导，必须显式升版，是漏改的高发点。</span>
+      </div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>引用方</th><th>被引用版本</th><th>被引用是否已发布</th><th>当前最新已发布</th><th>是否指向最新</th></tr></thead>
+          <tbody>
+          {% for item in check.cross_version %}
+            <tr>
+              <td><strong>{{ item.from }}</strong></td>
+              <td class="mono small">{{ item.target }}</td>
+              <td>{% if item.target_published %}<span class="tag ok">已发布</span>{% else %}<span class="tag err">未发布</span>{% endif %}</td>
+              <td class="mono small">{{ item.latest_published or '无' }}</td>
+              <td>{% if item.is_latest_published %}<span class="tag ok">是</span>{% else %}<span class="tag warn">否</span>{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </div>
+
+    <div id="tab-normal" class="tab-panel" hidden>
+      <div class="toolbar">
+        <strong>逐条依据：全部指标归一化前后对比（{{ check.metrics | length }} 条）</strong>
+        <span class="spacer"></span>
+        <span class="small muted">原始表达式 → 归一化表达式 → 维度/聚合/发布状态/下游数量</span>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead>
+            <tr><th>指标</th><th>原始表达式</th><th>归一化表达式</th><th>聚合</th><th>维度</th><th>下游</th><th>发布</th></tr>
+          </thead>
+          <tbody>
+          {% for metric in check.metrics %}
+            <tr>
+              <td><strong>{{ metric.name }}</strong>@{{ metric.version }}<div class="small muted">{{ metric.owner }}</div></td>
+              <td class="mono small cell-ellipsis">{{ metric.expression }}</td>
+              <td class="mono small cell-ellipsis">{{ metric.normalized }}
+                {% if metric.expression.strip() != metric.normalized %}<span class="tag">已归一化</span>{% endif %}
+              </td>
+              <td class="small">{{ metric.aggregation }}</td>
+              <td class="small">{{ metric.dimensions | join(', ') }}</td>
+              <td class="num">{{ metric.downstream_count }}</td>
+              <td>{% if metric.published %}<span class="tag ok">已发布</span>{% else %}<span class="tag warn">未发布</span>{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<details class="help" style="margin-top:12px">
+  <summary>下一步建议（按本次体检结论）</summary>
+  <ol class="list small" style="margin:0">
+    <li>{{ check.stats.conflict_count }} 组同名异口径：先在 <a href="/workbench">口径工作台</a> 选定唯一口径，把其余版本标记为历史/下线，再统一各看板取数。</li>
+    <li>{{ check.stats.cycle_count }} 条依赖环：把环内一端改成引用原子指标（<code>dim:</code>），例如 cpa 改为 <code>sum(dim:cost_amt)/count(dim:lead_id)</code>。</li>
+    <li>{{ check.stats.publish_blocked_count }} 个发布阻断：先发布 <code>gmv@3</code> 与 <code>uv@2</code>，但这些版本自身还卡在同名异口径上，需先合并口径。</li>
+    <li>改口径前务必到 <a href="/review">复核与发布</a> 页算一遍下游，breaking 项必须先改下游再发布。</li>
+  </ol>
+</details>
+
+{% endif %}
+{% endblock %}

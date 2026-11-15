@@ -1,0 +1,270 @@
+{
+  "seed_version": "2026-11-14.1",
+  "note": "指标体系组真实注册表快照：24 个指标版本条目、20 个指标名。故意保留 3 组同名异口径（gmv / uv / conversion_rate）、2 条依赖环（cpc↔cpa、unit_price↔gmv_unit）、4 个跨版本依赖、2 个未发布依赖。",
+  "metrics": [
+    {
+      "name": "order_amount",
+      "version": 1,
+      "expression": "sum(dim:order_amt)",
+      "unit": "CNY",
+      "aggregation": "sum",
+      "dimensions": ["dt", "channel", "region"],
+      "owner": "交易数据组",
+      "published": true,
+      "description": "下单金额原子指标，按 dt/channel/region 汇总 dim:order_amt"
+    },
+    {
+      "name": "refund_amount",
+      "version": 1,
+      "expression": "sum(dim:refund_amt)",
+      "unit": "CNY",
+      "aggregation": "sum",
+      "dimensions": ["dt", "channel"],
+      "owner": "交易数据组",
+      "published": true,
+      "description": "退款金额原子指标"
+    },
+    {
+      "name": "pay_amount",
+      "version": 1,
+      "expression": "sum(dim:pay_amt)",
+      "unit": "CNY",
+      "aggregation": "sum",
+      "dimensions": ["dt", "channel"],
+      "owner": "支付数据组",
+      "published": true,
+      "description": "支付成功金额原子指标"
+    },
+    {
+      "name": "order_count",
+      "version": 1,
+      "expression": "count(dim:order_id)",
+      "unit": "单",
+      "aggregation": "count",
+      "dimensions": ["dt", "channel"],
+      "owner": "交易数据组",
+      "published": true,
+      "description": "订单数原子指标"
+    },
+    {
+      "name": "visit_count",
+      "version": 1,
+      "expression": "count(dim:visit_id)",
+      "unit": "次",
+      "aggregation": "count",
+      "dimensions": ["dt", "channel", "source"],
+      "owner": "流量组",
+      "published": true,
+      "description": "访问次数原子指标"
+    },
+    {
+      "name": "user_count",
+      "version": 1,
+      "expression": "count(dim:user_id)",
+      "unit": "人",
+      "aggregation": "count",
+      "dimensions": ["dt", "region"],
+      "owner": "流量组",
+      "published": true,
+      "description": "去重用户数原子指标"
+    },
+    {
+      "name": "gmv",
+      "version": 1,
+      "expression": "metric:order_amount",
+      "unit": "CNY",
+      "aggregation": "sum",
+      "dimensions": ["dt", "channel"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "GMV 下单口径（交易看板）"
+    },
+    {
+      "name": "gmv",
+      "version": 2,
+      "expression": "metric:gmv@1 - metric:refund_amount",
+      "unit": "CNY",
+      "aggregation": "sum",
+      "dimensions": ["dt", "channel"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "GMV 净额口径（经营看板，基于 v1 扣退款）"
+    },
+    {
+      "name": "gmv",
+      "version": 3,
+      "expression": "metric:pay_amount",
+      "unit": "CNY",
+      "aggregation": "sum",
+      "dimensions": ["dt", "channel"],
+      "owner": "指标体系组",
+      "published": false,
+      "description": "GMV 支付口径（支付看板，尚未发布）"
+    },
+    {
+      "name": "uv",
+      "version": 1,
+      "expression": "count(dim:user_id)",
+      "unit": "人",
+      "aggregation": "count",
+      "dimensions": ["dt", "channel"],
+      "owner": "流量组",
+      "published": true,
+      "description": "去重访客 UV（流量看板 A）"
+    },
+    {
+      "name": "uv",
+      "version": 2,
+      "expression": "metric:uv@1 * 1",
+      "unit": "人",
+      "aggregation": "count",
+      "dimensions": ["dt", "channel"],
+      "owner": "流量组",
+      "published": false,
+      "description": "去重访客 UV（流量看板 B，多写了 *1 且未发布）"
+    },
+    {
+      "name": "conversion_rate",
+      "version": 1,
+      "expression": "metric:order_count / metric:visit_count",
+      "unit": "%",
+      "aggregation": "avg",
+      "dimensions": ["dt", "channel"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "下单转化率原值口径（0-1）"
+    },
+    {
+      "name": "conversion_rate",
+      "version": 2,
+      "expression": "( metric:order_count / metric:visit_count ) * 100.0",
+      "unit": "%",
+      "aggregation": "avg",
+      "dimensions": ["dt", "channel"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "下单转化率百分比口径（0-100），比 v1 多乘 100"
+    },
+    {
+      "name": "gmv_daily",
+      "version": 1,
+      "expression": "metric:order_amount - metric:refund_amount",
+      "unit": "CNY",
+      "aggregation": "sum",
+      "dimensions": ["dt", "channel"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "日粒度净 GMV，被 6 个下游指标引用"
+    },
+    {
+      "name": "gmv_7d",
+      "version": 1,
+      "expression": "sum(metric:gmv_daily) / 7",
+      "unit": "CNY",
+      "aggregation": "sum",
+      "dimensions": ["channel"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "近 7 日日均 GMV，按渠道分组"
+    },
+    {
+      "name": "gmv_index",
+      "version": 1,
+      "expression": "metric:gmv_7d / metric:gmv_daily",
+      "unit": "倍数",
+      "aggregation": "avg",
+      "dimensions": ["dt"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "当日 GMV 相对 7 日均值的倍数"
+    },
+    {
+      "name": "arpu",
+      "version": 1,
+      "expression": "metric:gmv_daily / metric:user_count",
+      "unit": "CNY",
+      "aggregation": "avg",
+      "dimensions": ["dt"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "客单价 ARPU"
+    },
+    {
+      "name": "revenue",
+      "version": 1,
+      "expression": "metric:arpu * metric:user_count",
+      "unit": "CNY",
+      "aggregation": "sum",
+      "dimensions": ["dt", "region"],
+      "owner": "财务口径组",
+      "published": true,
+      "description": "收入口径（ARPU × 用户数）"
+    },
+    {
+      "name": "pay_gmv_share",
+      "version": 1,
+      "expression": "metric:gmv@3 / metric:gmv_daily",
+      "unit": "%",
+      "aggregation": "avg",
+      "dimensions": ["dt", "channel"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "支付口径 GMV 占净 GMV 比例（引用未发布的 gmv@3）"
+    },
+    {
+      "name": "uv_per_gmv",
+      "version": 1,
+      "expression": "metric:uv@2 / metric:gmv_daily * 1000",
+      "unit": "人/千元",
+      "aggregation": "avg",
+      "dimensions": ["dt"],
+      "owner": "流量组",
+      "published": true,
+      "description": "每千元 GMV 的访客数（引用未发布的 uv@2）"
+    },
+    {
+      "name": "cpc",
+      "version": 1,
+      "expression": "metric:cpa * metric:conversion_rate",
+      "unit": "CNY",
+      "aggregation": "avg",
+      "dimensions": ["dt", "channel"],
+      "owner": "投放组",
+      "published": true,
+      "description": "点击成本，与 cpa 互相引用形成环"
+    },
+    {
+      "name": "cpa",
+      "version": 1,
+      "expression": "metric:cpc / metric:conversion_rate",
+      "unit": "CNY",
+      "aggregation": "avg",
+      "dimensions": ["dt", "channel"],
+      "owner": "投放组",
+      "published": true,
+      "description": "获客成本，与 cpc 互相引用形成环"
+    },
+    {
+      "name": "unit_price",
+      "version": 1,
+      "expression": "metric:gmv_unit / metric:order_count",
+      "unit": "CNY",
+      "aggregation": "avg",
+      "dimensions": ["dt"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "客单价（单量口径），与 gmv_unit 互相引用形成环"
+    },
+    {
+      "name": "gmv_unit",
+      "version": 1,
+      "expression": "metric:unit_price * metric:order_count",
+      "unit": "CNY",
+      "aggregation": "sum",
+      "dimensions": ["dt"],
+      "owner": "指标体系组",
+      "published": true,
+      "description": "单量口径 GMV，与 unit_price 互相引用形成环"
+    }
+  ]
+}

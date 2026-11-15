@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% block title %}总览 · {{ app_name }}{% endblock %}
+{% block crumb %}总览{% endblock %}
+{% block meta %}<span class="dot {% if overview.conflict_count or overview.cycle_count %}warn{% else %}ok{% endif %}"></span>服务正常 · {{ overview.metric_entries }} 个指标版本 · {{ overview.metric_names }} 个指标名{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/review">复核与发布</a>
+<a class="btn small" href="/workbench">去工作台</a>
+{% endblock %}
+{% block status_left %}样例 seed：{{ seed_result.reason }}（seed_version={{ seed_result.seed_version }}，{{ seed_result.rows }} 行） · 未发布 {{ overview.unpublished_entries }} 个版本{% endblock %}
+{% block status_right %}{{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">总览</h1>
+    <p class="page-sub">指标口径注册与依赖门禁：注册表归一化先判同名异口径，再走依赖图找环、算传递影响面，最后用发布门禁把关。
+      当前 {{ overview.metric_entries }} 个指标版本 / {{ overview.metric_names }} 个指标名 / {{ overview.edge_count }} 条依赖边，最长下游深度 {{ overview.max_depth }}（{{ overview.max_depth_node }}）。</p>
+  </div>
+  <div class="page-head-actions">
+    <form method="post" action="/check" style="display:inline-flex;margin:0">
+      <button type="submit" class="btn small">执行注册表体检</button>
+    </form>
+  </div>
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi">
+    <div class="k-label">指标版本</div>
+    <div class="k-value">{{ overview.metric_entries }}</div>
+    <div class="k-note">{{ overview.metric_names }} 个指标名 · {{ overview.edge_count }} 条依赖边</div>
+  </div>
+  <div class="kpi ok">
+    <div class="k-label">已发布</div>
+    <div class="k-value">{{ overview.published_entries }}</div>
+    <div class="k-note">未发布 {{ overview.unpublished_entries }} 个版本</div>
+  </div>
+  <div class="kpi {% if overview.conflict_count %}err{% else %}ok{% endif %}">
+    <div class="k-label">同名异口径</div>
+    <div class="k-value">{{ overview.conflict_count }} 组</div>
+    <div class="k-note">归一化后仍不同口径</div>
+  </div>
+  <div class="kpi {% if overview.cycle_count %}err{% else %}ok{% endif %}">
+    <div class="k-label">依赖环</div>
+    <div class="k-value">{{ overview.cycle_count }} 条</div>
+    <div class="k-note">DFS 三色检出</div>
+  </div>
+  <div class="kpi {% if overview.publish_blocked_count %}warn{% else %}ok{% endif %}">
+    <div class="k-label">未发布依赖</div>
+    <div class="k-value">{{ overview.publish_blocked_count }} 个</div>
+    <div class="k-note">引用未发布版本 · 发布被阻断</div>
+  </div>
+</div>
+
+<div class="split result">
+  <div>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>最近体检</h2>
+        <div class="panel-actions">
+          <span class="tag">{{ recent_checks | length }} 条 / 最多 6 条</span>
+          <a class="btn secondary small" href="/review">全部记录</a>
+        </div>
+      </div>
+      {% if recent_checks %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead>
+            <tr><th>体检号</th><th>结论</th><th class="nowrap">冲突 / 环 / 阻断</th><th>无法解析</th><th class="nowrap">生成时间</th><th></th></tr>
+          </thead>
+          <tbody>
+          {% for item in recent_checks %}
+            <tr>
+              <td class="nowrap"><a class="mono" href="/result/{{ item.check_id }}">{{ item.check_id }}</a></td>
+              <td class="nowrap">{% if item.verdict == 'blocked' %}<span class="tag err">不可发布</span>{% else %}<span class="tag ok">通过</span>{% endif %}</td>
+              <td class="nowrap"><span class="num">{{ item.stats.conflict_count }}</span> <span class="muted small">/</span> <span class="num">{{ item.stats.cycle_count }}</span> <span class="muted small">/</span> <span class="num">{{ item.stats.publish_blocked_count }}</span></td>
+              <td class="num">{{ item.stats.unresolved_count }}</td>
+              <td class="small muted nowrap">{{ item.created_at[:16] }}</td>
+              <td class="nowrap"><a class="btn secondary small" href="/result/{{ item.check_id }}">依据</a></td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">
+        <strong>还没有体检记录</strong>
+        点右上角「执行注册表体检」，或用右侧快捷操作跑一次，结果会落到 SQLite 并出现在这里。
+      </div>
+      {% endif %}
+    </section>
+
+    <section class="panel" id="conflict-preview">
+      <div class="panel-head">
+        <h2>同名异口径速览</h2>
+        <div class="panel-actions"><span class="tag {% if overview.conflict_count %}err{% else %}ok{% endif %}">{{ overview.conflict_count }} 组</span></div>
+      </div>
+      {% if top_conflicts %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>指标名</th><th>版本数</th><th>归一化口径分组</th></tr></thead>
+          <tbody>
+          {% for item in top_conflicts %}
+            <tr>
+              <td><strong>{{ item.name }}</strong></td>
+              <td class="num">{{ item.version_count }}</td>
+              <td>
+                {% for group in item.groups %}
+                  <div class="small mono">{{ group.normalized }}
+                    <span class="tag {% if group.published %}ok{% else %}warn{% endif %}">{{ group.version_keys | join(' / ') }}</span>
+                  </div>
+                {% endfor %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">没有同名异口径。</div>
+      {% endif %}
+    </section>
+  </div>
+
+  <div>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>快捷操作</h2>
+        <div class="panel-actions"><span class="tag">3 步主流程</span></div>
+      </div>
+      <div class="panel-body tight">
+        <form method="post" action="/check" style="margin:0 0 10px">
+          <button type="submit" class="btn small">执行注册表体检（冲突 / 环 / 发布阻断）</button>
+        </form>
+        <div class="form-inline">
+          <a class="btn secondary small" href="/workbench">去工作台改口径</a>
+          <a class="btn secondary small" href="/review">复核影响面与发布</a>
+        </div>
+        <ol class="list small" style="margin:12px 0 0">
+          <li>体检：落库一份结论快照，逐条带依据，可在「最近体检」里回看。</li>
+          <li>工作台：选指标改表达式/维度，实时看归一化与注册表状态。</li>
+          <li>复核与发布：算 breaking 影响面，过门禁后才允许发布。</li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="panel" id="cycle-preview">
+      <div class="panel-head">
+        <h2>依赖环速览</h2>
+        <div class="panel-actions"><span class="tag {% if overview.cycle_count %}err{% else %}ok{% endif %}">{{ overview.cycle_count }} 条</span></div>
+      </div>
+      <div class="panel-body tight">
+        {% if cycles %}
+        <ul class="list small" style="margin:0">
+          {% for cycle in cycles %}
+          <li><span class="tag err">环 {{ cycle.length }} 节点</span> <span class="mono">{{ cycle.path | join(' → ') }}</span></li>
+          {% endfor %}
+        </ul>
+        <p class="small muted" style="margin:8px 0 0">环内指标不允许发布：改任意一端都会让取数顺序不成立。</p>
+        {% else %}
+        <p class="small muted" style="margin:0">没有检测到依赖环。</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <details class="help" style="margin-top:12px">
+      <summary>演示步骤（3 步）</summary>
+      <ol class="list small" style="margin:0">
+        <li>点「执行注册表体检」→ 结果页看 3 组同名异口径、2 条依赖环、2 条发布阻断与逐条依据。</li>
+        <li>进入 <a href="/workbench">口径工作台</a>，选 <code>gmv_daily@1</code>，把维度从 <code>dt,channel</code> 改成 <code>dt</code> →
+          「计算变更影响面」：6 个下游，其中 2 个 breaking（按 channel 分组的 gmv_7d、pay_gmv_share）。</li>
+        <li>在 <a href="/review">复核与发布</a> 页登记修正后的 <code>gmv_daily@2</code> 并发布，验证门禁放行；
+          再试发布 <code>gmv@3</code>（支付口径），会被同名异口径拦住。</li>
+      </ol>
+    </details>
+
+    <details class="help" style="margin-top:8px">
+      <summary>谁在用 · 输入什么 · 输出什么</summary>
+      <ul class="list small" style="margin:0">
+        <li><strong>谁在用</strong>：指标体系组（口径 owner）+ 各看板数据开发 + 财务口径组。目前靠 Excel 口径表 + 口头同步。</li>
+        <li><strong>输入</strong>：24 个指标版本的注册表（名称/版本/表达式/单位/聚合/维度/负责人/是否发布），页面可继续编辑。</li>
+        <li><strong>输出</strong>：体检报告（冲突组数、环路径、发布阻断）+ 变更影响面（breaking 清单）+ 发布结论，逐条带依据。</li>
+        <li><strong>当前样例</strong>：跨版本依赖 {{ overview.cross_version_count }} 处，无法解析引用 {{ overview.unresolved_count }} 处。</li>
+      </ul>
+    </details>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,302 @@
+{% extends "base.html" %}
+{% block title %}复核与发布 · {{ app_name }}{% endblock %}
+{% block crumb %}复核与发布{% endblock %}
+{% block meta %}<span class="dot {% if latest and latest.verdict == 'blocked' %}warn{% else %}ok{% endif %}"></span>{% if latest %}最近体检 {{ latest.check_id }} · {% if latest.verdict == 'blocked' %}不可发布{% else %}通过{% endif %}{% else %}还没有体检记录{% endif %} · 事件 {{ events | length }} 条{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/workbench">回工作台</a>
+<form method="post" action="/check" style="display:inline-flex;margin:0">
+  <button type="submit" class="btn small">再体检一次</button>
+</form>
+{% endblock %}
+{% block status_left %}注册表 {{ metrics | length }} 个指标版本 · 已发布 {{ overview.published_entries }} · 阻断 {{ overview.publish_blocked_count }} · 体检结论只能由后端真算{% endblock %}
+{% block status_right %}{% if impact %}影响面 <code>{{ impact.impact_id }}</code>{% else %}{{ app_name }}{% endif %}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">变更影响面与发布门禁</h1>
+    <p class="page-sub">改口径前先算清下游：<strong>breaking</strong>（移除下游依赖的维度／改聚合／引入环／引用未发布版本）必须阻断，
+      <strong>requires_sync</strong> 需同步登记新版本并通知使用方；过门禁后才允许点「发布」。</p>
+  </div>
+  <div class="page-head-actions">
+    {% if latest %}<a class="btn secondary small" href="/result/{{ latest.check_id }}">查看最近体检依据</a>{% endif %}
+    <a class="btn small" href="/workbench">去工作台改口径</a>
+  </div>
+</div>
+
+<div class="split result" style="margin-top:12px">
+  <div>
+    <section class="panel">
+      <div class="toolbar">
+        <input type="search" id="review-search" placeholder="搜索指标名 / 归一化表达式 / 负责人" aria-label="搜索指标注册表" style="min-width:260px">
+        <select id="review-version" aria-label="按版本筛选">
+          <option value="">全部版本</option>
+          {% for version in metrics | map(attribute='version') | unique | sort %}
+          <option value="v{{ version }}">v{{ version }}</option>
+          {% endfor %}
+        </select>
+        <select id="review-published" aria-label="按发布状态筛选">
+          <option value="">全部发布状态</option>
+          <option value="1">已发布</option>
+          <option value="0">未发布</option>
+        </select>
+        <span class="spacer"></span>
+        <span class="small muted" id="review-stat">共 {{ metrics | length }} 个指标版本</span>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense" id="review-table">
+      <thead>
+        <tr><th>指标</th><th>归一化表达式</th><th class="nowrap">聚合 · 维度</th><th>状态</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+      {% for metric in metrics %}
+        <tr data-search="{{ metric.name }} {{ metric.normalized }} {{ metric.expression }} {{ metric.owner }}"
+            data-version="v{{ metric.version }}"
+            data-published="{{ '1' if metric.published else '0' }}">
+          <td class="nowrap"><strong>{{ metric.name }}</strong>@{{ metric.version }}<span class="sub">{{ metric.owner }} · {{ metric.unit or '—' }}</span></td>
+          <td class="mono small cell-ellipsis">{{ metric.normalized }}</td>
+          <td class="small nowrap">{{ metric.aggregation }} · {{ metric.dimensions | join(', ') }}</td>
+          <td class="nowrap">{% if metric.published %}<span class="tag ok">已发布</span>{% else %}<span class="tag warn">未发布</span>{% endif %}</td>
+          <td class="nowrap">
+            {% if metric.published %}
+            <span class="muted small">—</span>
+            {% else %}
+            <button type="button" class="secondary small btn-publish" data-name="{{ metric.name }}" data-version="{{ metric.version }}">发布</button>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+      </div>
+    </section>
+
+    {% if impact %}
+    <section class="panel" id="impact-detail">
+      <div class="panel-head">
+        <h2>变更影响面 · {{ impact.target.key }}</h2>
+        <div class="panel-actions">
+          <span class="tag">生成于 {{ impact.created_at }}</span>
+          <span class="tag err">{{ impact.breaking_count }} breaking</span>
+          <span class="tag warn">{{ impact.requires_sync_count }} requires_sync</span>
+        </div>
+      </div>
+      <div class="panel-body tight">
+        <div class="kpi-strip" style="margin-bottom:0">
+          <div class="kpi"><div class="k-label">传递下游</div><div class="k-value">{{ impact.downstream_count }}</div><div class="k-note">含传递，按最短跳数</div></div>
+          <div class="kpi {% if impact.breaking_count %}err{% else %}ok{% endif %}"><div class="k-label">breaking</div><div class="k-value">{{ impact.breaking_count }}</div><div class="k-note">阻断发布</div></div>
+          <div class="kpi {% if impact.requires_sync_count %}warn{% else %}ok{% endif %}"><div class="k-label">requires_sync</div><div class="k-value">{{ impact.requires_sync_count }}</div><div class="k-note">需同步升版并通知</div></div>
+        </div>
+      </div>
+
+      <div class="toolbar">
+        <strong>归一化前后对比</strong>
+        <span class="spacer"></span>
+        <span class="small muted">{{ impact.target.key }} · 表达式 / 聚合 / 维度</span>
+      </div>
+      <div class="table-wrap auto">
+        <table class="dense">
+          <thead><tr><th>项目</th><th>变更前</th><th>变更后</th><th>判定</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>表达式</td>
+              <td class="mono small">{{ impact.target.expression }}<div class="muted">{{ impact.target.normalized }}</div></td>
+              <td class="mono small">{{ impact.proposed.expression }}<div class="muted">{{ impact.proposed.normalized }}</div></td>
+              <td>{% if impact.proposed.expression_changed %}<span class="tag warn">口径变化</span>{% else %}<span class="tag ok">口径未变</span>{% endif %}</td>
+            </tr>
+            <tr>
+              <td>聚合</td>
+              <td class="small">{{ impact.target.aggregation }}</td>
+              <td class="small">{{ impact.proposed.aggregation }}</td>
+              <td>{% if impact.proposed.aggregation_changed %}<span class="tag err">聚合变更 → 全部下游 breaking</span>{% else %}<span class="tag ok">未变</span>{% endif %}</td>
+            </tr>
+            <tr>
+              <td>维度</td>
+              <td class="small">{{ impact.target.dimensions | join(', ') }}</td>
+              <td class="small">{{ impact.proposed.dimensions | join(', ') }}</td>
+              <td>
+                {% if impact.proposed.removed_dims %}<span class="tag err">移除 {{ impact.proposed.removed_dims | join(', ') }}</span>{% endif %}
+                {% if impact.proposed.added_dims %}<span class="tag">新增 {{ impact.proposed.added_dims | join(', ') }}</span>{% endif %}
+                {% if not impact.proposed.removed_dims and not impact.proposed.added_dims %}<span class="tag ok">未变</span>{% endif %}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="toolbar">
+        <strong>breaking 清单（{{ impact.breaking_count }} 项，必须先改下游或撤回本次变更）</strong>
+        <span class="spacer"></span>
+        <span class="small muted">规则码 + 逐条依据</span>
+      </div>
+      {% if impact.breaking %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>下游指标</th><th>维度</th><th>归一化表达式</th><th>规则</th><th>依据</th></tr></thead>
+          <tbody>
+          {% for item in impact.breaking %}
+            <tr>
+              <td><strong>{{ item.name }}</strong>@{{ item.version }}<div class="small muted">{{ item.owner }} · 深度 L{{ item.depth }}</div></td>
+              <td class="small">{{ item.dimensions | join(', ') }}</td>
+              <td class="mono small cell-ellipsis">{{ item.normalized }}</td>
+              <td><span class="tag err">{{ item.code }}</span></td>
+              <td class="small">{{ item.reason }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">本次变更没有 breaking 项。</div>
+      {% endif %}
+
+      <div class="toolbar">
+        <strong>requires_sync 清单（{{ impact.requires_sync_count }} 项，需同步版本化）</strong>
+        <span class="spacer"></span>
+        <span class="small muted">不阻断，但必须同步登记并通知使用方</span>
+      </div>
+      {% if impact.requires_sync %}
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>下游指标</th><th>维度</th><th>归一化表达式</th><th>下一步</th></tr></thead>
+          <tbody>
+          {% for item in impact.requires_sync %}
+            <tr>
+              <td><strong>{{ item.name }}</strong>@{{ item.version }}<div class="small muted">{{ item.owner }} · 深度 L{{ item.depth }}</div></td>
+              <td class="small">{{ item.dimensions | join(', ') }}</td>
+              <td class="mono small cell-ellipsis">{{ item.normalized }}</td>
+              <td class="small">{{ item.reason }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">没有需要同步的下游。</div>
+      {% endif %}
+
+      {% if impact.notes %}
+      <div class="panel-body tight">
+        <ul class="list small" style="margin:0">
+          {% for note in impact.notes %}<li>{{ note }}</li>{% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+    </section>
+    {% else %}
+    <section class="panel">
+      <div class="panel-head"><h2>变更影响面</h2></div>
+      <div class="empty">
+        <strong>还没有影响面记录</strong>
+        去 <a href="/workbench">口径工作台</a> 选指标改口径，或在右侧「快速发起变更评估」里试一次。
+      </div>
+    </section>
+    {% endif %}
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>版本历史与历史体检</h2>
+        <div class="panel-actions"><span class="tag">{{ events | length }} 事件 · {{ checks | length }} 次体检</span></div>
+      </div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>时间</th><th>类型</th><th>摘要</th></tr></thead>
+          <tbody>
+          {% for event in events %}
+            <tr>
+              <td class="small muted">{{ event.at }}</td>
+              <td><span class="tag">{{ event.kind }}</span></td>
+              <td class="small">{{ event.summary }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% if checks %}
+      <div class="toolbar">
+        <strong>历史体检</strong>
+        <span class="spacer"></span>
+        <span class="small muted">冲突 / 环 / 阻断</span>
+      </div>
+      <div class="table-wrap">
+        <table class="dense">
+          <thead><tr><th>体检号</th><th>时间</th><th>结论</th><th>冲突 / 环 / 阻断</th></tr></thead>
+          <tbody>
+          {% for item in checks %}
+            <tr>
+              <td><a class="mono" href="/result/{{ item.check_id }}">{{ item.check_id }}</a></td>
+              <td class="small muted">{{ item.created_at }}</td>
+              <td>{% if item.verdict == 'blocked' %}<span class="tag err">不可发布</span>{% else %}<span class="tag ok">通过</span>{% endif %}</td>
+              <td class="small">{{ item.stats.conflict_count }} / {{ item.stats.cycle_count }} / {{ item.stats.publish_blocked_count }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </section>
+  </div>
+
+  <section class="panel pane-sticky" id="publish-pane">
+    <div class="panel-head">
+      <h2>变更影响与发布操作</h2>
+      <div class="panel-actions"><span class="tag">4 条门禁规则</span></div>
+    </div>
+    <div class="panel-body">
+      <div class="field">
+        <label>最近一次体检</label>
+        {% if latest %}
+        <p class="small" style="margin:0">
+          <a class="mono" href="/result/{{ latest.check_id }}">{{ latest.check_id }}</a>
+          {% if latest.verdict == 'blocked' %}<span class="tag err">不可发布</span>{% else %}<span class="tag ok">通过</span>{% endif %}
+        </p>
+        <p class="small muted" style="margin:2px 0 0">
+          冲突 {{ latest.stats.conflict_count }} 组 · 环 {{ latest.stats.cycle_count }} 条 · 阻断 {{ latest.stats.publish_blocked_count }} 个 · {{ latest.created_at }}
+        </p>
+        <p class="small muted" style="margin:4px 0 0">{{ latest.verdict_detail }}</p>
+        {% else %}
+        <p class="small muted" style="margin:0">还没有体检记录，先点底部「再体检一次」。</p>
+        {% endif %}
+      </div>
+
+      <div class="field">
+        <label for="impact-name">快速发起变更评估 · 指标名</label>
+        <select id="impact-name">
+          {% for metric in metrics | unique(attribute='name') %}
+            <option value="{{ metric.name }}">{{ metric.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="impact-expression">新表达式</label>
+        <input type="text" id="impact-expression" placeholder="metric:order_amount - metric:refund_amount">
+      </div>
+      <div class="field">
+        <label for="impact-dimensions">新维度（逗号分隔）</label>
+        <input type="text" id="impact-dimensions" placeholder="dt">
+      </div>
+      <div id="quick-error" class="alert alert-error" hidden></div>
+      <div id="quick-result" class="small"></div>
+
+      <div id="publish-error" class="alert alert-error" hidden></div>
+      <div id="publish-out" class="small"></div>
+
+      <details class="help" style="margin-top:10px">
+        <summary>发布门禁规则（4 条）</summary>
+        <ol class="list small" style="margin:0">
+          <li>被引用指标版本必须已发布；</li>
+          <li>引用必须存在；</li>
+          <li>环内指标不允许发布；</li>
+          <li>同名指标口径必须与已发布基线一致（否则先登记口径变更）。</li>
+        </ol>
+      </details>
+    </div>
+    <div class="panel-actions">
+      <button type="button" id="btn-quick-impact" class="small">计算影响面</button>
+      <form method="post" action="/check" style="display:inline-flex;margin:0">
+        <button type="submit" class="secondary small">再体检一次</button>
+      </form>
+    </div>
+  </section>
+</div>
+{% endblock %}
